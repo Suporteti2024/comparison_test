@@ -83,3 +83,17 @@ Rodar o prompt acima com acesso ao SQL Server e ao Redis de produção/homologa�
 - Sócios ativos (Members.Status=0, Titles.Status=0), sem suspensão, sem cheque Status 4, `BlockLists`/`BlockedPersons`/`AccessPenalties`/`Protections` vazias, pendência 14161549 já encerrada (EndAction preenchido), `AccessControlPendencies` vazia.
 - Os dois títulos têm `Warning` preenchido, mas 4.827 de 11.367 títulos ativos também têm, então não discrimina.
 - Mesmo mistério já registrado nas rodadas 10/11. Sem a regra real, não foi alterada nenhuma regra de bloqueio (evita repetir a regressão de 76 para 2.099 casos).
+
+### D1/D2 — CAUSA ENCONTRADA E CORREÇÃO IMPLEMENTADA (2026-11-11)
+Regra PRODUCT ("RESTRIÇÃO") do MultiClubes, descoberta comparando ~570 chamadas SOAP reais com o SQL Server:
+bloqueia na ENTRADA quando o título tem uma parcela ativa, com valor, **sem nenhum pagamento (PaidValue=0)**, de produto cujo `Type` está em
+`AccessControlProductTypes` do controle (Angelina = 2 e 3), e cuja **cobrança (`Duns.DueDate`, não `Parcels.DueDate`)** venceu há mais de
+`AccessDueDays` (`ProductTypeAccessDueDaysConfigurations`: 30 dias para tipos 2/3, 60 para o 10). Títulos com `DunModes.DunType = 2` não bloqueiam.
+- 5041501/1166701: parcelas "MANUT. FAM. MENSAL" de 05/10/2026 sem pagamento, cobrança vencida há 36 dias.
+- Por que falhou antes: usavam `Parcels.DueDate`, ignoravam o tipo de produto do controle e contavam pagamento parcial como dívida.
+- Evidência: 347/347 corretos na amostra de calibração; em amostra independente, 100 previstos como bloqueados: 94 "RESTRIÇÃO" + 3 negados antes por cheque/suspensão + 3 liberados;
+  100 previstos como liberados: 0 "RESTRIÇÃO".
+- Implementação: ETL `ProductDueBlockRefreshService` + `ProductDueBlockRefreshScheduler` (a cada 10 min, ~10 s de consulta) gravam `hebraica:access:productdue:{AccessCode}` (CSV de controles);
+  `AccessValidationService` (entrada, regra PRODUCT ativa) nega com `PRODUCT_DENIED`/"RESTRIÇÃO". Testes novos em `AccessValidationServiceTest.ProductDue`.
+- Não compilado/testado nem publicado (sem JDK; Docker parado). Divergências residuais conhecidas: ~3% de falsos positivos e 1 caso DunType 2 negado sem causa identificada.
+- Após o deploy: reexecutar entrada.xlsx e também as baterias de Fit, piscina, Alceu e Hungria (a regra vale para qualquer controle com PRODUCT ativo).
